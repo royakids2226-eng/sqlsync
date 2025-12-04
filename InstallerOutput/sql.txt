@@ -1,0 +1,248 @@
+-- =================================================================================
+--  == SCRIPT MAESTRO: THE COMPLETE AND FINAL SQL SETUP SCRIPT ==
+--  This script will configure everything needed for the sync system on the database side.
+--  Execute this script in its entirety.
+-- =================================================================================
+
+-- !! ========================== !!
+-- !!        ACTION REQUIRED      !!
+-- !! ========================== !!
+-- !!  Replace [kayan] below with your actual database name.
+-- !! ========================== !!
+USE [kayan];
+GO
+
+
+-- =================================================================================
+-- STEP 0: USER AND PERMISSIONS SETUP (RUNS ON 'master' IMPLICITLY IF NEEDED)
+-- =================================================================================
+PRINT '--> STEP 0: Configuring User and Permissions...';
+USE master;
+GO
+IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = 'testuser')
+BEGIN
+    CREATE LOGIN [testuser] WITH PASSWORD = N'testpass123', CHECK_POLICY=OFF;
+    PRINT '    - Login [testuser] created.';
+END
+ELSE
+BEGIN
+    PRINT '    - Login [testuser] already exists.';
+END
+GO
+
+-- =====================================================================
+-- ==                  *** START OF MODIFICATION ***                  ==
+-- This block grants the required server-level role for the service to run correctly.
+-- =====================================================================
+PRINT '    - Granting sysadmin server role to [testuser] login...';
+EXEC sp_addsrvrolemember 'testuser', 'sysadmin';
+PRINT '    - Login [testuser] granted sysadmin role.';
+GO
+-- =====================================================================
+-- ==                   *** END OF MODIFICATION ***                   ==
+-- =====================================================================
+
+-- Switch back to your target database
+USE [kayan]; --<-- IMPORTANT: Ensure this matches the name you set at the top
+GO
+IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = 'testuser')
+BEGIN
+    CREATE USER [testuser] FOR LOGIN [testuser];
+    PRINT '    - User [testuser] created in the database.';
+END
+ELSE
+BEGIN
+    PRINT '    - User [testuser] already exists in the database.';
+END
+GO
+EXEC sp_addrolemember 'db_owner', 'testuser';
+PRINT '    - User [testuser] granted db_owner role.';
+GO
+
+
+-- =================================================================================
+-- STEP 1: CLEANUP - DROP ALL EXISTING OBJECTS FOR A FRESH START
+-- =================================================================================
+PRINT '--> STEP 1: Cleaning up all old sync-related objects...';
+
+-- Drop Triggers first
+IF OBJECT_ID('TR_Log_mytypes_qtys', 'TR') IS NOT NULL DROP TRIGGER TR_Log_mytypes_qtys;
+IF OBJECT_ID('TR_Log_myitems', 'TR') IS NOT NULL DROP TRIGGER TR_Log_myitems;
+IF OBJECT_ID('TR_Log_myunits', 'TR') IS NOT NULL DROP TRIGGER TR_Log_myunits;
+IF OBJECT_ID('TR_Log_mytypes_cost', 'TR') IS NOT NULL DROP TRIGGER TR_Log_mytypes_cost;
+
+-- Drop Procedures
+IF OBJECT_ID('sp_RefreshMaterializedRow', 'P') IS NOT NULL DROP PROCEDURE sp_RefreshMaterializedRow;
+IF OBJECT_ID('sp_GetCalculatedItemData_Custom', 'P') IS NOT NULL DROP PROCEDURE sp_GetCalculatedItemData_Custom;
+
+-- Drop Tables
+IF OBJECT_ID('dbo.SyncData_Materialized', 'U') IS NOT NULL DROP TABLE dbo.SyncData_Materialized;
+IF OBJECT_ID('dbo.SyncChangesLog', 'U') IS NOT NULL DROP TABLE dbo.SyncChangesLog;
+
+GO
+PRINT '    Cleanup complete.';
+GO
+
+
+-- =================================================================================
+-- STEP 2: CREATE TABLES
+-- =================================================================================
+PRINT '--> STEP 2: Creating required tables [SyncChangesLog] and [SyncData_Materialized]...';
+
+-- Create the logging table
+CREATE TABLE dbo.SyncChangesLog (
+    LogID INT IDENTITY(1,1) PRIMARY KEY,
+    type_id INT NOT NULL,
+    stor_id INT,
+    ChangeType NVARCHAR(10) NOT NULL,
+    Processed BIT NOT NULL DEFAULT 0,
+    LogTime DATETIME DEFAULT GETDATE()
+);
+PRINT '    - Table [SyncChangesLog] created.';
+
+-- Create the materialized table with the final specified columns
+CREATE TABLE dbo.SyncData_Materialized (
+    unique_id NVARCHAR(50) PRIMARY KEY, master_code NVARCHAR(100), item_code NVARCHAR(100), item_name NVARCHAR(255), color NVARCHAR(255),
+    size NVARCHAR(255), item_id INT, type_id INT, unit_id INT, unit_convert FLOAT, multi_unit BIT, multi_type BIT, unit_def1_id INT,
+    cur_qty DECIMAL(18, 3), group_id INT, class_id INT, is_basic_unit BIT, class_name NVARCHAR(200), kind_id INT, place_id INT,
+    unit_name_id INT, unit_name NVARCHAR(200), av_price MONEY, out_price MONEY, stor_id INT, group_name NVARCHAR(200),
+    kind_name NVARCHAR(200), place_name NVARCHAR(200)
+);
+PRINT '    - Table [SyncData_Materialized] created.';
+GO
+
+
+-- =================================================================================
+-- STEP 3: CREATE HELPER STORED PROCEDURES
+-- =================================================================================
+PRINT '--> STEP 3: Creating helper stored procedures...';
+GO
+
+-- Procedure to get all data for a specific item variant
+CREATE PROCEDURE sp_GetCalculatedItemData_Custom
+    @type_id INT,
+    @stor_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SELECT
+        CAST(t.type_id AS VARCHAR(20)) + '-' + ISNULL(CAST(tq.stor_id AS VARCHAR(20)), 'NULL') AS unique_id,
+        i.item_code AS master_code,
+        CASE WHEN t.newrec = 0 THEN CAST(i.item_code AS NVARCHAR(100)) + '.' + CAST(t.type_code AS NVARCHAR(100)) ELSE i.item_code END AS item_code,
+        p.CalculatedName AS item_name, p.Color AS color, p.Size AS size, i.item_id, t.type_id, u.unit_id, ud.unit_convert, i.multi_unit, i.multi_type, i.unit_def1_id,
+        tq.cur_qty0 AS cur_qty, i.group_id, i.class_id, ud.is_basic_unit, ci.class_name, i.kind_id, i.place_id, ud.unit_name_id, un.unit_name,
+        ISNULL(tc.av_price0, 0) AS av_price, u.out_price_0 AS out_price, tq.stor_id, g.group_name, k.kind_name, p_place.place_name
+    FROM dbo.myitems AS i
+    INNER JOIN dbo.mytypes AS t ON i.item_id = t.item_id INNER JOIN dbo.mytypes_qtys AS tq ON t.type_id = tq.type_id
+    LEFT JOIN dbo.myunits AS u ON t.type_id = u.type_id LEFT JOIN dbo.myunits_data AS ud ON u.unit_data_id = ud.unit_data_id
+    LEFT JOIN dbo.myunits_name AS un ON ud.unit_name_id = un.unit_name_id LEFT JOIN dbo.myclass_items AS ci ON i.class_id = ci.class_id
+    LEFT JOIN dbo.mytypes_cost AS tc ON t.type_id = tc.type_id AND ISNULL(tq.stor_id, 0) = ISNULL(tc.stor_id, 0)
+    LEFT JOIN dbo.mygroups AS g ON i.group_id = g.group_id LEFT JOIN dbo.mykinds AS k ON i.kind_id = k.kind_id
+    LEFT JOIN dbo.myplaces AS p_place ON i.place_id = p_place.place_id
+    CROSS APPLY (SELECT FullName = dbo.get_item_name(t.type_id, t.newrec, i.multi_type, i.item_name, t.type_name, i.group_id, i.company_id, i.kind_id)) AS fn
+    CROSS APPLY (SELECT DashPos = CHARINDEX('-', fn.FullName), AmpPos = CHARINDEX('&', SUBSTRING(fn.FullName, CHARINDEX('-', fn.FullName) + 1, 1000))) AS positions
+    CROSS APPLY (SELECT CalculatedName = CASE WHEN positions.DashPos > 0 THEN LEFT(fn.FullName, positions.DashPos - 1) ELSE fn.FullName END, Color = CASE WHEN positions.DashPos > 0 THEN CASE WHEN positions.AmpPos > 0 THEN LEFT(SUBSTRING(fn.FullName, positions.DashPos + 1, 1000), positions.AmpPos - 1) ELSE SUBSTRING(fn.FullName, positions.DashPos + 1, 1000) END ELSE '' END, Size = CASE WHEN positions.DashPos > 0 AND positions.AmpPos > 0 THEN SUBSTRING(SUBSTRING(fn.FullName, positions.DashPos + 1, 1000), positions.AmpPos + 1, 1000) ELSE '' END) AS p
+    WHERE t.type_id = @type_id AND ISNULL(tq.stor_id, -1) = ISNULL(@stor_id, -1);
+END
+GO
+PRINT '    - Procedure [sp_GetCalculatedItemData_Custom] created.';
+GO
+
+-- Procedure to refresh a row in the materialized table
+CREATE PROCEDURE sp_RefreshMaterializedRow
+    @type_id INT,
+    @stor_id INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @unique_id NVARCHAR(50) = CAST(@type_id AS VARCHAR(20)) + '-' + ISNULL(CAST(@stor_id AS VARCHAR(20)), 'NULL');
+    DELETE FROM dbo.SyncData_Materialized WHERE unique_id = @unique_id;
+    INSERT INTO dbo.SyncData_Materialized EXEC sp_GetCalculatedItemData_Custom @type_id = @type_id, @stor_id = @stor_id;
+END
+GO
+PRINT '    - Procedure [sp_RefreshMaterializedRow] created.';
+GO
+
+
+-- =================================================================================
+-- STEP 4: CREATE LIGHTWEIGHT, LOG-ONLY TRIGGERS
+-- =================================================================================
+PRINT '--> STEP 4: Creating lightweight, non-conflicting triggers...';
+GO
+
+-- Trigger on mytypes_qtys
+CREATE TRIGGER TR_Log_mytypes_qtys ON dbo.mytypes_qtys
+AFTER INSERT, UPDATE, DELETE
+AS BEGIN
+    SET NOCOUNT ON;
+    IF EXISTS (SELECT * FROM inserted) AND NOT EXISTS (SELECT * FROM deleted) INSERT INTO dbo.SyncChangesLog (type_id, stor_id, ChangeType) SELECT type_id, stor_id, 'UPDATE' FROM inserted;
+    IF EXISTS (SELECT * FROM inserted) AND EXISTS (SELECT * FROM deleted) INSERT INTO dbo.SyncChangesLog (type_id, stor_id, ChangeType) SELECT i.type_id, i.stor_id, 'UPDATE' FROM inserted i JOIN deleted d ON i.qty_id = d.qty_id WHERE i.cur_qty0 <> d.cur_qty0;
+    IF EXISTS (SELECT * FROM deleted) AND NOT EXISTS (SELECT * FROM inserted) INSERT INTO dbo.SyncChangesLog (type_id, stor_id, ChangeType) SELECT type_id, stor_id, 'DELETE' FROM deleted;
+END
+GO
+PRINT '    - Trigger on [mytypes_qtys] created.';
+GO
+
+-- Trigger on myitems
+CREATE TRIGGER TR_Log_myitems ON dbo.myitems
+AFTER UPDATE
+AS BEGIN
+    SET NOCOUNT ON;
+    IF UPDATE(item_name) OR UPDATE(item_code)
+        INSERT INTO dbo.SyncChangesLog (type_id, stor_id, ChangeType) SELECT t.type_id, q.stor_id, 'UPDATE' FROM dbo.mytypes t JOIN dbo.mytypes_qtys q ON t.type_id = q.type_id WHERE t.item_id IN (SELECT item_id FROM inserted);
+END
+GO
+PRINT '    - Trigger on [myitems] created.';
+GO
+
+-- Trigger on myunits
+CREATE TRIGGER TR_Log_myunits ON dbo.myunits
+AFTER UPDATE
+AS BEGIN
+    SET NOCOUNT ON;
+    IF UPDATE(out_price_0)
+        INSERT INTO dbo.SyncChangesLog (type_id, stor_id, ChangeType) SELECT t.type_id, q.stor_id, 'UPDATE' FROM dbo.mytypes t JOIN dbo.mytypes_qtys q ON t.type_id = q.type_id WHERE t.type_id IN (SELECT type_id FROM inserted);
+END
+GO
+PRINT '    - Trigger on [myunits] created.';
+GO
+
+-- Trigger on mytypes_cost
+CREATE TRIGGER TR_Log_mytypes_cost ON dbo.mytypes_cost
+AFTER INSERT, UPDATE
+AS BEGIN
+    SET NOCOUNT ON;
+    INSERT INTO dbo.SyncChangesLog (type_id, stor_id, ChangeType) SELECT t.type_id, q.stor_id, 'UPDATE' FROM dbo.mytypes t JOIN dbo.mytypes_qtys q ON t.type_id = q.type_id WHERE t.type_id IN (SELECT type_id FROM inserted);
+END
+GO
+PRINT '    - Trigger on [mytypes_cost] created.';
+GO
+
+
+-- =================================================================================
+-- STEP 5: INITIAL DATA POPULATION
+-- =================================================================================
+PRINT '--> STEP 5: Performing initial population of the materialized table... (This may take a few minutes)';
+INSERT INTO dbo.SyncData_Materialized ( unique_id, master_code, item_code, item_name, color, size, item_id, type_id, unit_id, unit_convert, multi_unit, multi_type, unit_def1_id, cur_qty, group_id, class_id, is_basic_unit, class_name, kind_id, place_id, unit_name_id, unit_name, av_price, out_price, stor_id, group_name, kind_name, place_name )
+SELECT
+    CAST(t.type_id AS VARCHAR(20)) + '-' + ISNULL(CAST(tq.stor_id AS VARCHAR(20)), 'NULL'), i.item_code, CASE WHEN t.newrec = 0 THEN CAST(i.item_code AS NVARCHAR(100)) + '.' + CAST(t.type_code AS NVARCHAR(100)) ELSE i.item_code END,
+    p.CalculatedName, p.Color, p.Size, i.item_id, t.type_id, u.unit_id, ud.unit_convert, i.multi_unit, i.multi_type, i.unit_def1_id, tq.cur_qty0,
+    i.group_id, i.class_id, ud.is_basic_unit, ci.class_name, i.kind_id, i.place_id, ud.unit_name_id, un.unit_name, ISNULL(tc.av_price0, 0),
+    u.out_price_0, tq.stor_id, g.group_name, k.kind_name, p_place.place_name
+FROM dbo.myitems AS i
+INNER JOIN dbo.mytypes AS t ON i.item_id = t.item_id INNER JOIN dbo.mytypes_qtys AS tq ON t.type_id = tq.type_id
+LEFT JOIN dbo.myunits AS u ON t.type_id = u.type_id LEFT JOIN dbo.myunits_data AS ud ON u.unit_data_id = ud.unit_data_id
+LEFT JOIN dbo.myunits_name AS un ON ud.unit_name_id = un.unit_name_id LEFT JOIN dbo.myclass_items AS ci ON i.class_id = ci.class_id
+LEFT JOIN dbo.mytypes_cost AS tc ON t.type_id = tc.type_id AND ISNULL(tq.stor_id, 0) = ISNULL(tc.stor_id, 0)
+LEFT JOIN dbo.mygroups AS g ON i.group_id = g.group_id LEFT JOIN dbo.mykinds AS k ON i.kind_id = k.kind_id
+LEFT JOIN dbo.myplaces AS p_place ON i.place_id = p_place.place_id
+CROSS APPLY (SELECT FullName = dbo.get_item_name(t.type_id, t.newrec, i.multi_type, i.item_name, t.type_name, i.group_id, i.company_id, i.kind_id)) AS fn
+CROSS APPLY (SELECT DashPos = CHARINDEX('-', fn.FullName), AmpPos = CHARINDEX('&', SUBSTRING(fn.FullName, CHARINDEX('-', fn.FullName) + 1, 1000))) AS positions
+CROSS APPLY (SELECT CalculatedName = CASE WHEN positions.DashPos > 0 THEN LEFT(fn.FullName, positions.DashPos - 1) ELSE fn.FullName END, Color = CASE WHEN positions.DashPos > 0 THEN CASE WHEN positions.AmpPos > 0 THEN LEFT(SUBSTRING(fn.FullName, positions.DashPos + 1, 1000), positions.AmpPos - 1) ELSE SUBSTRING(fn.FullName, positions.DashPos + 1, 1000) END ELSE '' END, Size = CASE WHEN positions.DashPos > 0 AND positions.AmpPos > 0 THEN SUBSTRING(SUBSTRING(fn.FullName, positions.DashPos + 1, 1000), positions.AmpPos + 1, 1000) ELSE '' END) AS p
+WHERE (i.multi_type = 0 AND tq.cur_qty0 IS NOT NULL) OR (t.newrec = 0);
+GO
+
+PRINT '==================================================================================';
+PRINT '==             DATABASE SETUP AND INITIALIZATION COMPLETE!                      ==';
+PRINT '==================================================================================';
+GO

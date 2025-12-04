@@ -1,0 +1,24 @@
+{
+  "name": "sync-server-app",
+  "version": "1.0.0",
+  "description": "Real-time SQL Server to Google Sheets synchronization server.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "node obfuscate.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "fs-extra": "^11.3.2",
+    "mssql": "^10.0.2",
+    "node-windows": "^1.0.0-beta.8",
+    "pg": "^8.16.3",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "javascript-obfuscator": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

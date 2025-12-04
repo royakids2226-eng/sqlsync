@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>لوحة مراقبة المزامنة</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0; 
+            background-color: #121212; 
+            color: #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        header {
+            background-color: #1e1e1e;
+            padding: 15px 25px;
+            border-bottom: 1px solid #333;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        h1 {
+            margin: 0;
+            font-size: 1.5em;
+        }
+        #status {
+            padding: 5px 15px;
+            border-radius: 15px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        .status-connected { background-color: #28a745; color: white; }
+        .status-disconnected { background-color: #dc3545; color: white; }
+        
+        main {
+            flex-grow: 1;
+            padding: 25px;
+            overflow-y: auto;
+        }
+        #log-container {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        .log-entry {
+            background-color: #1e1e1e;
+            border: 1px solid #333;
+            border-left: 5px solid;
+            padding: 15px;
+            border-radius: 5px;
+            animation: fadeIn 0.5s ease;
+        }
+        .log-entry.status-info { border-left-color: #17a2b8; }
+        .log-entry.status-success { border-left-color: #28a745; }
+        .log-entry.status-error { border-left-color: #dc3545; }
+        .log-entry p { margin: 0 0 5px 0; }
+        .log-entry .timestamp { font-size: 0.8em; color: #888; }
+        .log-entry .message { font-weight: bold; }
+        .log-entry .details { font-size: 0.9em; color: #ccc; margin-top: 10px; white-space: pre-wrap; word-break: break-all; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1><span style="color:#00aaff;">Live</span> Sync Monitor</h1>
+        <div id="status" class="status-disconnected">جاري الاتصال...</div>
+    </header>
+    
+    <main>
+        <div id="log-container">
+            <!-- Log entries will be added here dynamically -->
+        </div>
+    </main>
+
+    <script>
+        const statusDiv = document.getElementById('status');
+        const logContainer = document.getElementById('log-container');
+        const ws = new WebSocket('ws://localhost:3000');
+
+        function addLogEntry(level, message, details = null) {
+            const entry = document.createElement('div');
+            entry.className = `log-entry status-${level}`;
+            
+            const timestamp = new Date().toLocaleTimeString('ar-EG');
+            
+            let detailsHtml = '';
+            if (details) {
+                const detailsString = typeof details === 'object' ? JSON.stringify(details, null, 2) : details;
+                detailsHtml = `<div class="details">${detailsString}</div>`;
+            }
+            
+            entry.innerHTML = `
+                <p class="timestamp">${timestamp}</p>
+                <p class="message">${message}</p>
+                ${detailsHtml}
+            `;
+            
+            logContainer.prepend(entry);
+
+            if (logContainer.children.length > 100) {
+                logContainer.lastChild.remove();
+            }
+        }
+
+        ws.onopen = () => {
+            statusDiv.textContent = 'متصل';
+            statusDiv.className = 'status status-connected';
+            addLogEntry('success', 'تم الاتصال بنجاح بخادم المراقبة.');
+        };
+
+        ws.onmessage = (event) => {
+            const { action, payload } = JSON.parse(event.data);
+
+            switch (action) {
+                case 'info':
+                    addLogEntry('info', payload.message);
+                    break;
+                case 'error':
+                    addLogEntry('error', payload.message, payload.details);
+                    break;
+                case 'sync_start':
+                    const counts = payload.counts;
+                    let countMsg = '';
+                    if (counts) {
+                        countMsg = ` (تحديثات: ${counts.updates}, حذف: ${counts.deletions})`
+                    }
+                    addLogEntry('info', `[${payload.type}] بدأت عملية المزامنة... ${countMsg}`);
+                    break;
+                case 'sync_end':
+                    const { type, status, details } = payload;
+                    let summary = `تحديثات: ${details.updates || 0}, حذف: ${details.deletions || 0}`;
+                    if(details.synchronized) summary = `تم مزامنة ${details.synchronized} سجل بنجاح.`
+                    if (status === 'success') {
+                        if ((details.updates || 0) > 0 || (details.deletions || 0) > 0 || details.synchronized) {
+                             addLogEntry('success', `[${type}] اكتملت المزامنة بنجاح.`, summary);
+                        }
+                    } else {
+                        addLogEntry('error', `[${type}] فشلت عملية المزامنة.`, details.error || summary);
+                    }
+                    break;
+            }
+        };
+
+        ws.onclose = () => {
+            statusDiv.textContent = 'غير متصل';
+            statusDiv.className = 'status status-disconnected';
+            addLogEntry('error', 'انقطع الاتصال بخادم المراقبة. سيتم محاولة إعادة الاتصال تلقائيًا.');
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket Error:', error);
+            addLogEntry('error', 'حدث خطأ في WebSocket.', error.message);
+        };
+    </script>
+</body>
+</html>

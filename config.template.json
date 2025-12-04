@@ -1,0 +1,20 @@
+{
+  "db_config": {
+    "user": "%DB_USER%",
+    "password": "%DB_PASSWORD%",
+    "server": "%DB_SERVER%",
+    "database": "%DB_DATABASE%",
+    "options": {
+      "encrypt": false,
+      "trustServerCertificate": true
+    },
+    "requestTimeout": 300000,
+    "pool": {
+      "idleTimeoutMillis": 60000
+    }
+  },
+  "table_name": "SyncData_Materialized",
+  "google_script_url": "%GOOGLE_API_URL%",
+  "sync_interval_ms": 2000,
+  "state_file": "sync_state.json"
+}

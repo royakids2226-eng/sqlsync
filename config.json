@@ -1,0 +1,20 @@
+{
+  "db_config": {
+    "user": "testuser",
+    "password": "testpass123",
+    "server": "localhost\\SQLEXPRESS",
+    "database": "kayan",
+    "options": {
+      "encrypt": false,
+      "trustServerCertificate": true
+    },
+    "requestTimeout": 300000,
+    "pool": {
+      "idleTimeoutMillis": 60000
+    }
+  },
+  "table_name": "SyncData_Materialized",
+  "pg_connection_string": "postgresql://mounir:123@185.172.57.61:5432/toy",
+  "sync_interval_ms": 2000,
+  "state_file": "sync_state.json"
+}
